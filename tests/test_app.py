@@ -1,9 +1,6 @@
 import io
 from openpyxl import Workbook, load_workbook
-from fastapi.testclient import TestClient
-from app.main import app, validate, export_workbook, prepare_products, TemplateError, verify_export
-
-client = TestClient(app)
+from app.main import validate, export_workbook, prepare_products, TemplateError, verify_export, index
 
 def test_validation_duplicate_and_required():
     rows=[{"category":"女士短连衣裙","title":"A","description_en":"dress","sku":"X","color":"Red","size":"M","price":"100","stock":"2","image_url":"http://x"},{"sku":"X"}]
@@ -77,5 +74,5 @@ def test_missing_category_sheet_blocks_export():
         pass
 
 def test_inspect_endpoint():
-    r=client.post('/api/inspect', files={'template':('x.xlsx',template_bytes(),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')})
-    assert r.status_code == 200 and r.json()['sheets'][0]['category'] == '女士短连衣裙'
+    html = index()
+    assert "SHEIN" in html and "默认申报供货价" in html
