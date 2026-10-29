@@ -1,5 +1,6 @@
 import io
 import asyncio
+import struct
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
 import app.main as main
@@ -118,3 +119,33 @@ def test_fabric_elasticity_values_are_restricted():
 def test_fabric_elasticity_is_preserved_in_draft_payload():
     row=prepare_products([{"sku":"E2","price":"200","attr_39":"高弹"}])[0]
     assert row["attr_39"] == "高弹"
+
+def test_official_template_exposes_image_fields():
+    template = Path("/workspace/attachments/cec88a87-2a53-4b1f-87fe-a463b14793c8/批量添加商品模板 (2).xlsx")
+    if not template.exists():
+        return
+    wb = load_workbook(template)
+    metadata = main.template_metadata(wb)
+    for category in main.CATEGORIES:
+        fields = metadata[category]["image_fields"]
+        assert fields[:3] == ["main_img", "square_img", "piece_img"]
+        assert "detail_img_10" in fields and "sku_image" in fields
+
+def test_local_image_asset_is_blocked_from_formal_export():
+    row = {"category":"女士短连衣裙", "sku":"IMG-1", "title":"A", "description_en":"D", "price":"200",
+           "color":"黑色", "size":"M", "stock":"1", "images":{"main_img": {"path":"product_images/x.png", "url":"", "width":900, "height":1200, "mime":"image/png", "size":100}}}
+    wb = load_workbook(io.BytesIO(full_template_bytes()))
+    for ws in [wb[x] for x in ["女士两件套 95-1780", "女士短连衣裙 67-1727", "女士连体裤 154-1860"]]:
+        ws.cell(2, 9, "首图"); ws.cell(3, 9, "main_img")
+    b=io.BytesIO(); wb.save(b)
+    try:
+        export_workbook(b.getvalue(), [row])
+    except TemplateError as exc:
+        assert "公开图片 URL" in str(exc)
+
+def test_png_dimension_parser_and_image_rules():
+    raw = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", 900, 1200) + b"\x00" * 20
+    assert main.image_dimensions(raw, ".png")[:2] == (900, 1200)
+    asset = {"url":"https://cdn.example/x.png", "width":900, "height":1200, "mime":"image/png", "size":100}
+    assert main.validate_image_for_field(asset, "main_img") == []
+    assert main.validate_image_for_field({**asset, "width":80, "height":80}, "main_img")
