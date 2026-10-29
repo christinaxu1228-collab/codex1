@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import io, json, re, tempfile
+import io, json, re, tempfile, sqlite3
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 app = FastAPI(title="SHEIN 半托管女装批量上品", version="1.0.0")
 BASE = Path(__file__).parent
+DB_PATH = BASE.parent / "shein_drafts.sqlite3"
 
 CATEGORIES = {
     "女士两件套": {"id": "95-1780", "aliases": ["两件套", "two piece", "set"]},
@@ -23,6 +24,7 @@ SENSITIVE = ["fake", "replica", "counterfeit", "仿牌", "假货", "毒品", "we
 DEFAULT_DECLARED_PRICE = Decimal("200.00")
 PRICE_STATUSES = ["待提交", "已提交，待核价", "核价通过", "核价未通过", "需要调整报价"]
 FIELD_CANDIDATES = {
+    "supplier_code": ["supplier_code", "商品货号", "货号", "SPU", "款号"],
     "sku": ["supplier_sku", "sku", "货号", "商品货号", "供应商货号"],
     "title": ["default_product_name[en]", "product_name[en]", "商品名称", "商品标题", "title"],
     "description_en": ["default_product_desc[en]", "product_desc[en]", "英文描述", "description_en", "描述"],
@@ -54,7 +56,7 @@ def parse_products(raw: bytes, filename: str) -> list[dict[str, Any]]:
     return list(csv.DictReader(io.StringIO(text)))
 
 def normalize(row: dict[str, Any]) -> dict[str, Any]:
-    aliases = {"标题":"title", "商品标题":"title", "英文描述":"description_en", "描述":"description_en", "货号":"sku", "颜色":"color", "尺码":"size", "供货价":"price", "价格":"price", "库存":"stock", "图片链接":"image_url", "类目":"category"}
+    aliases = {"标题":"title", "商品标题":"title", "英文描述":"description_en", "描述":"description_en", "货号":"supplier_code", "商品货号":"supplier_code", "SPU":"supplier_code", "卖家SKU":"sku", "SKU":"sku", "颜色":"color", "尺码":"size", "供货价":"price", "价格":"price", "库存":"stock", "仓库库存":"stock", "图片链接":"image_url", "商品图片":"image_url", "类目":"category", "主规格":"main_attribute", "主规格内容":"main_attribute_value", "材质":"attr_160", "面料弹性":"attr_39"}
     return {aliases.get(str(k).strip(), str(k).strip()): ("" if v is None else v) for k, v in row.items()}
 
 def money(value: Any, default: Decimal = DEFAULT_DECLARED_PRICE) -> str:
@@ -97,6 +99,8 @@ def validate(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if str(row.get("price", "")).strip():
             try: float(row["price"])
             except (TypeError, ValueError): errors.append({"row": i, "field": "price", "message": "供货价必须是数字"})
+        if row.get("image_url") and not re.match(r"^https?://\S+$", str(row["image_url"])):
+            errors.append({"row": i, "field": "image_url", "message": "图片链接必须是可访问的 http/https 地址"})
     return errors
 
 def template_columns(ws) -> dict[str, int]:
@@ -125,7 +129,9 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
         columns = template_columns(ws)
         if "sku" not in columns or "price" not in columns:
             raise TemplateError(f"工作表“{ws.title}”缺少官方 SKU 或 cost/供货价字段（请检查第2-6行）")
-        for offset, product in enumerate(by_category.get(category, [])):
+        # 同一货号的多个 SKU 相邻写入，稳定排序且不生成新货号。
+        category_products = sorted(by_category.get(category, []), key=lambda p: (str(p.get("supplier_code", "")), str(p.get("sku", ""))))
+        for offset, product in enumerate(category_products):
             target = 7 + offset
             for field, value in product.items():
                 if field in {"declared_price", "shein_feedback_price", "pricing_status", "pricing_note"}:
@@ -144,6 +150,33 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
                 if "currency" in label or "币种" in label:
                     if not ws.cell(target, col).value: ws.cell(target, col, "USD")
     output = io.BytesIO(); wb.save(output); output.seek(0); return output.getvalue()
+
+def verify_export(template: bytes, result: bytes, products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Read the generated workbook and compare every exported SKU and cost."""
+    wb = load_workbook(io.BytesIO(result), data_only=False)
+    expected = {(str(p.get("category")), str(p.get("sku"))): money(p.get("price")) for p in products}
+    actual = set()
+    errors = []
+    for ws in wb.worksheets:
+        category = category_for_sheet(ws.title)
+        if not category: continue
+        columns = template_columns(ws)
+        for row in range(7, ws.max_row + 1):
+            sku = ws.cell(row, columns.get("sku", 0)).value if columns.get("sku") else None
+            if not sku: continue
+            cost = ws.cell(row, columns.get("price", 0)).value if columns.get("price") else None
+            key = (category, str(sku))
+            actual.add(key)
+            if key not in expected: errors.append({"sku": str(sku), "message": "导出文件出现未确认的 SKU"})
+            elif cost is None or money(cost) != expected[key]: errors.append({"sku": str(sku), "message": f"cost 为 {cost}，预期 {expected[key]}"})
+    for key in expected:
+        if key not in actual: errors.append({"sku": key[1], "message": "导出文件缺少该 SKU"})
+    return errors
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS drafts (sku TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+init_db()
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -166,4 +199,22 @@ async def export(template: UploadFile = File(...), products: UploadFile = File(.
     if errors: return {"ok": False, "errors": errors, "preview": rows[:20]}
     try: result = export_workbook(template_bytes, rows)
     except TemplateError as exc: return {"ok": False, "errors": [{"row": 0, "field": "template", "message": str(exc)}], "preview": rows[:20]}
+    verification_errors = verify_export(template_bytes, result, rows)
+    if verification_errors:
+        return {"ok": False, "errors": [{"row": 0, "field": "export", **error} for error in verification_errors], "preview": rows[:20]}
     return StreamingResponse(io.BytesIO(result), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=shein_products.xlsx"})
+
+@app.post("/api/drafts")
+async def save_drafts(payload: dict[str, Any]):
+    rows = payload.get("products", [])
+    with sqlite3.connect(DB_PATH) as db:
+        for row in rows:
+            sku = str(row.get("sku", "")).strip()
+            if sku: db.execute("INSERT OR REPLACE INTO drafts(sku,payload,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)", (sku, json.dumps(row, ensure_ascii=False)))
+    return {"saved": len([r for r in rows if str(r.get("sku", "")).strip()])}
+
+@app.get("/api/drafts")
+def load_drafts():
+    with sqlite3.connect(DB_PATH) as db:
+        rows = db.execute("SELECT payload FROM drafts ORDER BY updated_at DESC").fetchall()
+    return {"products": [json.loads(row[0]) for row in rows]}
