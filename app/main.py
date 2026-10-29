@@ -23,6 +23,7 @@ REQUIRED = ["category", "title", "description_en", "sku", "color", "size", "pric
 SENSITIVE = ["fake", "replica", "counterfeit", "仿牌", "假货", "毒品", "weapon"]
 DEFAULT_DECLARED_PRICE = Decimal("200.00")
 PRICE_STATUSES = ["待提交", "已提交，待核价", "核价通过", "核价未通过", "需要调整报价"]
+FABRIC_ELASTICITY_VALUES = ["无弹", "低弹", "中弹", "高弹"]
 FIELD_CANDIDATES = {
     "supplier_code": ["supplier_code", "商品货号", "货号", "SPU", "款号"],
     "sku": ["supplier_sku", "sku", "货号", "商品货号", "供应商货号"],
@@ -122,6 +123,8 @@ def validate(products: list[dict[str, Any]], required_fields: list[str] | None =
             except (TypeError, ValueError): errors.append({"row": i, "field": "price", "message": "供货价必须是数字"})
         if row.get("image_url") and not re.match(r"^https?://\S+$", str(row["image_url"])):
             errors.append({"row": i, "field": "image_url", "message": "图片链接必须是可访问的 http/https 地址"})
+        if str(row.get("attr_39", "")).strip() and row["attr_39"] not in FABRIC_ELASTICITY_VALUES:
+            errors.append({"row": i, "field": "attr_39", "message": "面料弹性必须从官方选项：无弹、低弹、中弹、高弹中选择"})
     return errors
 
 def template_columns(ws) -> dict[str, int]:
