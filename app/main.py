@@ -13,9 +13,9 @@ app = FastAPI(title="SHEIN 半托管女装批量上品", version="1.0.0")
 BASE = Path(__file__).parent
 
 CATEGORIES = {
-    "女士两件套": {"id": "95-1780", "min": 95, "max": 1780, "aliases": ["两件套", "two piece", "set"]},
-    "女士短连衣裙": {"id": "67-1727", "min": 67, "max": 1727, "aliases": ["短连衣裙", "dress", "连衣裙"]},
-    "女士连体裤": {"id": "154-1860", "min": 154, "max": 1860, "aliases": ["连体裤", "jumpsuit", "romper"]},
+    "女士两件套": {"id": "95-1780", "aliases": ["两件套", "two piece", "set"]},
+    "女士短连衣裙": {"id": "67-1727", "aliases": ["短连衣裙", "dress", "连衣裙"]},
+    "女士连体裤": {"id": "154-1860", "aliases": ["连体裤", "jumpsuit", "romper"]},
 }
 REQUIRED = ["category", "title", "description_en", "sku", "color", "size", "price", "stock", "image_url"]
 SENSITIVE = ["fake", "replica", "counterfeit", "仿牌", "假货", "毒品", "weapon"]
@@ -51,12 +51,11 @@ def validate(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if sku: seen.add(sku)
         for field, value in row.items():
             if any(word.lower() in str(value).lower() for word in SENSITIVE): errors.append({"row": i, "field": field, "message": "包含敏感词"})
-        try:
-            price = float(row.get("price", 0)); category = str(row.get("category", ""))
-            if category in CATEGORIES:
-                info = CATEGORIES[category]
-                if not (info["min"] <= price <= info["max"]): errors.append({"row": i, "field": "price", "message": f"供货价应为 {info['min']}-{info['max']}"})
-        except (TypeError, ValueError): pass
+        # 类目编号（例如 95-1780）仅用于识别工作表，不是供货价范围。
+        # 官方模板未提供统一的跨类目价格上下限，因此这里只校验价格是否为数字。
+        if str(row.get("price", "")).strip():
+            try: float(row["price"])
+            except (TypeError, ValueError): errors.append({"row": i, "field": "price", "message": "供货价必须是数字"})
     return errors
 
 def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
