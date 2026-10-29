@@ -149,3 +149,4 @@ def test_png_dimension_parser_and_image_rules():
     asset = {"url":"https://cdn.example/x.png", "width":900, "height":1200, "mime":"image/png", "size":100}
     assert main.validate_image_for_field(asset, "main_img") == []
     assert main.validate_image_for_field({**asset, "width":80, "height":80}, "main_img")
+
