@@ -22,6 +22,19 @@ REQUIRED = ["category", "title", "description_en", "sku", "color", "size", "pric
 SENSITIVE = ["fake", "replica", "counterfeit", "仿牌", "假货", "毒品", "weapon"]
 DEFAULT_DECLARED_PRICE = Decimal("200.00")
 PRICE_STATUSES = ["待提交", "已提交，待核价", "核价通过", "核价未通过", "需要调整报价"]
+FIELD_CANDIDATES = {
+    "sku": ["supplier_sku", "sku", "货号", "商品货号", "供应商货号"],
+    "title": ["default_product_name[en]", "product_name[en]", "商品名称", "商品标题", "title"],
+    "description_en": ["default_product_desc[en]", "product_desc[en]", "英文描述", "description_en", "描述"],
+    "price": ["cost", "申报供货价", "供货价", "supplier_cost", "price"],
+    "image_url": ["main_image", "image", "商品图片", "图片链接", "image_url", "product_image"],
+    "color": ["color", "颜色", "主规格", "颜色名称"],
+    "size": ["size", "尺码", "尺码名称"],
+    "stock": ["warehouse_stock", "stock", "库存", "仓库库存"],
+    "category": ["category", "类目", "商品类目"],
+}
+class TemplateError(ValueError):
+    pass
 
 def category_for_sheet(title: str) -> str | None:
     value = title.lower()
@@ -71,6 +84,8 @@ def validate(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
     errors = []; seen = set()
     for i, source in enumerate(products, 1):
         row = normalize(source); sku = str(row.get("sku", "")).strip()
+        if str(row.get("category", "")).strip() not in CATEGORIES:
+            errors.append({"row": i, "field": "category", "message": "商品类目必须是支持的三个女装类目"})
         for field in REQUIRED:
             if not str(row.get(field, "")).strip(): errors.append({"row": i, "field": field, "message": "必填项为空"})
         if sku and sku in seen: errors.append({"row": i, "field": "sku", "message": "重复 SKU"})
@@ -84,37 +99,50 @@ def validate(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
             except (TypeError, ValueError): errors.append({"row": i, "field": "price", "message": "供货价必须是数字"})
     return errors
 
+def template_columns(ws) -> dict[str, int]:
+    """Map internal CSV fields using official template rows 2-3, without writing headers."""
+    values: dict[str, int] = {}
+    for col in range(1, ws.max_column + 1):
+        labels = [str(ws.cell(row, col).value or "").strip() for row in (2, 3, 4, 5, 6)]
+        normalized = {label.lower() for label in labels if label}
+        for field, candidates in FIELD_CANDIDATES.items():
+            if any(candidate.lower() in normalized for candidate in candidates):
+                values[field] = col
+    return values
+
 def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
     wb = load_workbook(io.BytesIO(template))
+    found = {category_for_sheet(ws.title) for ws in wb.worksheets}
+    missing = [name for name in CATEGORIES if name not in found]
+    if missing:
+        raise TemplateError("官方模板缺少工作表：" + "、".join(missing))
     by_category = {c: [] for c in CATEGORIES}
     for p in products:
         row = normalize(p); by_category.setdefault(row.get("category", ""), []).append(row)
     for ws in wb.worksheets:
         category = category_for_sheet(ws.title)
         if not category: continue
-        headers = {str(cell.value).strip(): cell.column for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 20)) for cell in row if cell.value}
-        # 模板前六行保持不变；第七行及以后按官方字段名或英文别名写入
-        start = max(7, next((r for r in range(1, min(ws.max_row, 20)+1) if any(str(c.value).strip().lower() in {"sku", "商品编码", "product sku"} for c in ws[r])), 7))
-        if not headers:
-            headers = {name: idx for idx, name in enumerate(REQUIRED, 1)}
+        columns = template_columns(ws)
+        if "sku" not in columns or "price" not in columns:
+            raise TemplateError(f"工作表“{ws.title}”缺少官方 SKU 或 cost/供货价字段（请检查第2-6行）")
         for offset, product in enumerate(by_category.get(category, [])):
-            target = start + 1 + offset
+            target = 7 + offset
             for field, value in product.items():
                 if field in {"declared_price", "shein_feedback_price", "pricing_status", "pricing_note"}:
                     if field != "declared_price":
                         continue  # 核价管理字段属于本系统记录，不写入官方商品模板
                     field = "price"
-                col = headers.get(field) or headers.get(field.replace("_", " ")) or headers.get("供货价")
+                col = columns.get(field)
                 if col is None:
-                    # 仅在模板没有字段时追加列，保留既有格式
-                    col = max(headers.values(), default=0) + 1; headers[field] = col; ws.cell(start, col, field)
-                if field in {"declared_price", "price"}: value = money(value)
-                ws.cell(target, col, float(value) if field in {"declared_price", "price"} and str(value).replace('.', '', 1).isdigit() else value)
-                if field in {"declared_price", "price"}: ws.cell(target, col).number_format = "0.00"
+                    continue  # 未在官方第2-6行声明的输入不写入模板，也不制造第7行表头
+                if field == "price": value = money(value)
+                ws.cell(target, col, float(value) if field == "price" and str(value).replace('.', '', 1).isdigit() else value)
+                if field == "price": ws.cell(target, col).number_format = "0.00"
             # Fill a template currency column only when the official sheet exposes one.
-            for currency_name in ("币种", "Currency", "currency"):
-                if currency_name in headers and not ws.cell(target, headers[currency_name]).value:
-                    ws.cell(target, headers[currency_name], "USD")
+            for col in range(1, ws.max_column + 1):
+                label = str(ws.cell(2, col).value or ws.cell(3, col).value or "").lower()
+                if "currency" in label or "币种" in label:
+                    if not ws.cell(target, col).value: ws.cell(target, col, "USD")
     output = io.BytesIO(); wb.save(output); output.seek(0); return output.getvalue()
 
 @app.get("/", response_class=HTMLResponse)
@@ -135,6 +163,7 @@ async def validate_products(products: UploadFile = File(...), default_price: str
 async def export(template: UploadFile = File(...), products: UploadFile = File(...), default_price: str = Form("200.00")):
     template_bytes = await template.read(); rows = prepare_products(parse_products(await products.read(), products.filename or "products.csv"), default_price)
     errors = validate(rows)
-    if errors: return {"ok": False, "errors": errors, "preview": [normalize(r) for r in rows[:20]]}
-    result = export_workbook(template_bytes, rows)
+    if errors: return {"ok": False, "errors": errors, "preview": rows[:20]}
+    try: result = export_workbook(template_bytes, rows)
+    except TemplateError as exc: return {"ok": False, "errors": [{"row": 0, "field": "template", "message": str(exc)}], "preview": rows[:20]}
     return StreamingResponse(io.BytesIO(result), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=shein_products.xlsx"})
