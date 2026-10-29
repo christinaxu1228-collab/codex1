@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import io, json, re, tempfile, sqlite3
+import io, json, re, tempfile, sqlite3, uuid
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
@@ -13,6 +13,8 @@ from openpyxl.utils import get_column_letter
 app = FastAPI(title="SHEIN 半托管女装批量上品", version="1.0.0")
 BASE = Path(__file__).parent
 DB_PATH = BASE.parent / "shein_drafts.sqlite3"
+IMAGE_DIR = BASE.parent / "product_images"
+IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 CATEGORIES = {
     "女士两件套": {"id": "95-1780", "aliases": ["两件套", "two piece", "set"]},
@@ -63,7 +65,9 @@ def template_metadata(wb) -> dict[str, Any]:
     result = {}
     for ws in wb.worksheets:
         category = category_for_sheet(ws.title)
-        if category: result[category] = {"sheet": ws.title, "required": template_required_fields(ws), "options": options.get(category, {})}
+        if category:
+            result[category] = {"sheet": ws.title, "required": template_required_fields(ws), "options": options.get(category, {}),
+                                "image_fields": template_image_fields(ws), "image_rules": template_image_rules(ws)}
     return result
 
 def parse_products(raw: bytes, filename: str) -> list[dict[str, Any]]:
@@ -135,6 +139,8 @@ def template_columns(ws) -> dict[str, int]:
         normalized = {label.lower() for label in labels if label}
         identifier = str(ws.cell(3, col).value or "").strip()
         if identifier:
+            if identifier in {"main_img", "square_img", "piece_img", "sku_image"} or identifier.startswith("detail_img_"):
+                values.setdefault(identifier, col)
             if identifier.startswith("stock["): values.setdefault("stock", col)
             elif identifier.startswith("main_img"): values.setdefault("image_url", col)
             elif identifier.startswith("detail_img") or identifier in {"square_img", "piece_img", "sku_image"}: values.setdefault("image_url", col)
@@ -144,6 +150,78 @@ def template_columns(ws) -> dict[str, int]:
             if any(candidate.lower() in normalized for candidate in candidates):
                 values[field] = col
     return values
+
+def template_image_fields(ws) -> list[str]:
+    return [str(ws.cell(3, col).value).strip() for col in range(1, ws.max_column + 1)
+            if str(ws.cell(3, col).value or "").strip() in {"main_img", "square_img", "piece_img", "sku_image"}
+            or str(ws.cell(3, col).value or "").strip().startswith("detail_img_")]
+
+def template_image_rules(ws) -> dict[str, str]:
+    rules = {}
+    for col in range(1, ws.max_column + 1):
+        field = str(ws.cell(3, col).value or "").strip()
+        if field in template_image_fields(ws):
+            rules[field] = str(ws.cell(5, col).value or "") + " " + str(ws.cell(6, col).value or "")
+    return rules
+
+def image_url(value: Any) -> str:
+    if isinstance(value, dict): return str(value.get("url", "")).strip()
+    return str(value or "").strip()
+
+def product_image_values(product: dict[str, Any], field: str) -> list[Any]:
+    images = product.get("images") or {}
+    value = images.get(field) if isinstance(images, dict) else None
+    if value in (None, "") and field == "main_img": value = product.get("image_url", "")
+    if value in (None, ""): value = product.get(field, "")
+    if isinstance(value, list): return value
+    return [value] if value not in (None, "") else []
+
+def validate_image_asset(asset: dict[str, Any]) -> list[str]:
+    errors = []
+    mime = str(asset.get("mime", "")).lower()
+    if mime not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
+        errors.append("仅支持 JPG、JPEG、PNG、WebP")
+    try:
+        width, height = int(asset["width"]), int(asset["height"])
+        if width < 1 or height < 1: errors.append("图片尺寸无效")
+    except (KeyError, TypeError, ValueError): errors.append("无法读取图片尺寸")
+    if int(asset.get("size", 0) or 0) > 3 * 1024 * 1024: errors.append("图片大小不能超过 3MB")
+    return errors
+
+def image_dimensions(raw: bytes, suffix: str) -> tuple[int, int, str]:
+    """Read dimensions without a native imaging dependency."""
+    if raw.startswith(b"\x89PNG\r\n\x1a\n") and len(raw) >= 24:
+        import struct
+        return (*struct.unpack(">II", raw[16:24]), "image/png")
+    if raw[:2] == b"\xff\xd8":
+        i = 2
+        while i + 9 < len(raw):
+            if raw[i] != 0xFF: i += 1; continue
+            marker = raw[i + 1]; i += 2
+            if marker in (0xD8, 0xD9): continue
+            if i + 2 > len(raw): break
+            length = int.from_bytes(raw[i:i + 2], "big")
+            if marker in range(0xC0, 0xC4) or marker in range(0xC5, 0xC8) or marker in range(0xC9, 0xCC) or marker in range(0xCD, 0xD0):
+                if i + 7 <= len(raw): return (int.from_bytes(raw[i + 5:i + 7], "big"), int.from_bytes(raw[i + 3:i + 5], "big"), "image/jpeg")
+            i += length
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP" and raw[12:16] == b"VP8X" and len(raw) >= 30:
+        return (1 + int.from_bytes(raw[24:27], "little"), 1 + int.from_bytes(raw[27:30], "little"), "image/webp")
+    raise ValueError("unsupported or corrupt image")
+
+def validate_image_for_field(asset: Any, field: str) -> list[str]:
+    if isinstance(asset, str):
+        if not re.match(r"^https?://\S+$", asset): return ["必须是可访问的 http/https 图片链接；本地文件不能直接导出"]
+        return []
+    errors = validate_image_asset(asset if isinstance(asset, dict) else {})
+    try: w, h = int(asset["width"]), int(asset["height"])
+    except (KeyError, TypeError, ValueError): return errors
+    if field == "piece_img" and (w, h) != (80, 80): errors.append("色块图需要 80 x 80 px")
+    elif field == "square_img" and (w != h or not 900 <= w <= 2200): errors.append("方块图需要 900 x 900 至 2200 x 2200 px")
+    elif field in {"main_img", "sku_image"} or field.startswith("detail_img_"):
+        ratio = w / h if h else 0
+        if not (900 <= w <= 2200 and 900 <= h <= 2200 and 0.75 <= ratio <= 1): errors.append("图片需为 900-2200 px，宽高比例 3:4 至 1:1")
+    if not image_url(asset): errors.append("尚未获得公开图片 URL，不能写入正式 XLSX")
+    return errors
 
 def template_required_fields(ws) -> list[str]:
     columns = template_columns(ws); required = []
@@ -182,6 +260,14 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
                     raise TemplateError(f"工作表“{ws.title}”第 {target} 行缺少必填字段：{required}（请按第2-6行填写要求补充）")
             if product.get("attr_160") and valid_materials and product["attr_160"] not in valid_materials:
                 raise TemplateError(f"工作表“{ws.title}”第 {target} 行材质不在官方有效属性值中：{product['attr_160']}；请以模板“有效属性值”表为准")
+            for image_field in template_image_fields(ws):
+                image_values = product_image_values(product, image_field)
+                if len(image_values) > 1:
+                    raise TemplateError(f"工作表“{ws.title}”第 {target} 行图片字段 {image_field} 只能填写一个链接")
+                for image in image_values:
+                    image_errors = validate_image_for_field(image, image_field)
+                    if image_errors:
+                        raise TemplateError(f"工作表“{ws.title}”第 {target} 行 {image_field}：" + "；".join(image_errors))
             for field, value in product.items():
                 if field == "declared_price":
                     continue  # 旧 CSV/草稿快照不能覆盖网页最终确认的 price
@@ -193,6 +279,11 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
                 if field == "price": value = money(value)
                 ws.cell(target, col, float(value) if field == "price" and str(value).replace('.', '', 1).isdigit() else value)
                 if field == "price": ws.cell(target, col).number_format = "0.00"
+            # 图片必须使用模板声明的字段，并且只能写公开 URL；本地上传文件仅作为草稿资产保存。
+            for image_field in template_image_fields(ws):
+                values = product_image_values(product, image_field)
+                if values:
+                    ws.cell(target, columns[image_field], image_url(values[0]))
             # Fill a template currency column only when the official sheet exposes one.
             for col in range(1, ws.max_column + 1):
                 label = str(ws.cell(2, col).value or ws.cell(3, col).value or "").lower()
@@ -252,6 +343,35 @@ async def export(template: UploadFile = File(...), products: UploadFile = File(.
     if verification_errors:
         return {"ok": False, "errors": [{"row": 0, "field": "export", **error} for error in verification_errors], "preview": rows[:20]}
     return StreamingResponse(io.BytesIO(result), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=shein_products.xlsx"})
+
+@app.post("/api/images/upload")
+async def upload_images(files: list[UploadFile] = File(...), sku: str = Form(""), supplier_code: str = Form(""), image_type: str = Form("main_img")):
+    """Persist uploaded assets for drafts. No public URL is fabricated."""
+    allowed_types = {"main_img", "square_img", "piece_img", "sku_image"} | {f"detail_img_{i}" for i in range(1, 11)}
+    if image_type not in allowed_types:
+        return {"ok": False, "errors": [{"message": "图片分类必须来自官方模板字段"}]}
+    assets, errors = [], []
+    for upload in files:
+        raw = await upload.read()
+        suffix = Path(upload.filename or "").suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+            errors.append({"file": upload.filename, "message": "仅支持 JPG、JPEG、PNG、WebP"}); continue
+        try:
+            width, height, detected_mime = image_dimensions(raw, suffix)
+            mime = (detected_mime or upload.content_type or "").lower()
+        except Exception:
+            errors.append({"file": upload.filename, "message": "无法读取图片文件或文件已损坏"}); continue
+        asset_id = uuid.uuid4().hex + suffix
+        path = IMAGE_DIR / asset_id
+        path.write_bytes(raw)
+        asset = {"id": asset_id, "filename": upload.filename or asset_id, "path": str(path.relative_to(IMAGE_DIR.parent)),
+                 "url": "", "mime": mime, "size": len(raw), "width": width, "height": height,
+                 "sku": sku.strip() or Path(upload.filename or "").stem, "supplier_code": supplier_code.strip(), "image_type": image_type}
+        asset_errors = validate_image_for_field(asset, image_type)
+        if asset_errors: asset["warnings"] = asset_errors
+        assets.append(asset)
+    return {"ok": not errors, "assets": assets, "errors": errors,
+            "notice": "图片已持久化保存，但尚未获得公开 URL；正式 XLSX 导出前必须补充 SHEIN 接受的图片链接。"}
 
 @app.post("/api/drafts")
 async def save_drafts(payload: dict[str, Any]):
