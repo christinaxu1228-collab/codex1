@@ -92,3 +92,17 @@ def test_draft_save_and_reload_preserves_edits(tmp_path):
         assert restored == rows
     finally:
         main.DB_PATH = original_path
+
+def test_main_attribute_value_survives_prepare_and_export():
+    row = prepare_products([{"category":"女士连体裤", "supplier_code":"SPU-1", "sku":"TEST-JUMP-001", "title":"Jumpsuit", "description_en":"D", "price":"200", "main_attribute":"颜色", "main_attribute_value":"Black", "attr_39":"中弹", "attr_160":"棉"}])[0]
+    assert row["main_attribute_value"] == "Black"
+
+def test_fabric_elasticity_values_are_restricted():
+    base={"category":"女士连体裤","title":"A","description_en":"D","sku":"E1","price":"200","attr_39":"低弹","color":"黑色","size":"M","stock":"1","image_url":"https://x"}
+    assert validate([base]) == []
+    base["attr_39"]="未知弹性"
+    assert any(e["field"]=="attr_39" for e in validate([base]))
+
+def test_fabric_elasticity_is_preserved_in_draft_payload():
+    row=prepare_products([{"sku":"E2","price":"200","attr_39":"高弹"}])[0]
+    assert row["attr_39"] == "高弹"
