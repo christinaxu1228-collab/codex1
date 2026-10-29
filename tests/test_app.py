@@ -1,7 +1,7 @@
 import io
 from openpyxl import Workbook, load_workbook
 from fastapi.testclient import TestClient
-from app.main import app, validate, export_workbook
+from app.main import app, validate, export_workbook, prepare_products
 
 client = TestClient(app)
 
@@ -16,6 +16,21 @@ def test_category_code_is_not_price_range():
     assert validate([row]) == []
     row["price"] = "not-a-number"
     assert any(e["field"] == "price" and "数字" in e["message"] for e in validate([row]))
+
+def test_default_price_and_manual_price_are_preserved():
+    rows = prepare_products([{"category":"女士连体裤", "sku":"A", "price":""}, {"category":"女士两件套", "sku":"B", "price":"12.345"}])
+    assert rows[0]["price"] == "200.00"
+    assert rows[1]["price"] == "12.35"
+
+def test_custom_default_price():
+    assert prepare_products([{"price":""}], "188.8")[0]["price"] == "188.80"
+
+def test_three_categories_accept_default_price_and_export():
+    rows = []
+    for category, sku in [("女士两件套", "SET-1"), ("女士短连衣裙", "DR-1"), ("女士连体裤", "JP-1")]:
+        rows.append(prepare_products([{"category": category, "title": "A", "description_en": "item", "sku": sku, "color": "Red", "size": "M", "price": "", "stock": "1", "image_url": "https://img/x"}])[0])
+    assert [r["price"] for r in rows] == ["200.00", "200.00", "200.00"]
+    assert validate(rows) == []
 
 def template_bytes():
     wb=Workbook(); ws=wb.active; ws.title="女士短连衣裙 67-1727"
