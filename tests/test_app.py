@@ -97,6 +97,18 @@ def test_main_attribute_value_survives_prepare_and_export():
     row = prepare_products([{"category":"女士连体裤", "supplier_code":"SPU-1", "sku":"TEST-JUMP-001", "title":"Jumpsuit", "description_en":"D", "price":"200", "main_attribute":"颜色", "main_attribute_value":"Black", "attr_39":"中弹", "attr_160":"棉"}])[0]
     assert row["main_attribute_value"] == "Black"
 
+def test_final_price_wins_over_legacy_declared_price():
+    rows = [{"category":"女士短连衣裙", "sku":"PRICE-1", "title":"A", "description_en":"D", "price":"200.00", "declared_price":"22.99", "color":"黑色", "size":"M", "stock":"1", "image_url":"https://x"}]
+    result = export_workbook(full_template_bytes(), rows)
+    wb = load_workbook(io.BytesIO(result))
+    assert wb["女士短连衣裙 67-1727"]["D7"].value == 200
+
+def test_different_final_prices_round_trip_all_categories():
+    prices = {"女士两件套": "200.00", "女士短连衣裙": "18.75", "女士连体裤": "31.20"}
+    rows = [{"category": c, "sku": "P-" + c, "title":"A", "description_en":"D", "price":p, "declared_price":"19.99", "color":"黑色", "size":"M", "stock":"1", "image_url":"https://x"} for c,p in prices.items()]
+    template = full_template_bytes(); result = export_workbook(template, rows)
+    assert verify_export(template, result, rows) == []
+
 def test_fabric_elasticity_values_are_restricted():
     base={"category":"女士连体裤","title":"A","description_en":"D","sku":"E1","price":"200","attr_39":"低弹","color":"黑色","size":"M","stock":"1","image_url":"https://x"}
     assert validate([base]) == []
