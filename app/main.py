@@ -183,10 +183,10 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
             if product.get("attr_160") and valid_materials and product["attr_160"] not in valid_materials:
                 raise TemplateError(f"工作表“{ws.title}”第 {target} 行材质不在官方有效属性值中：{product['attr_160']}；请以模板“有效属性值”表为准")
             for field, value in product.items():
-                if field in {"declared_price", "shein_feedback_price", "pricing_status", "pricing_note"}:
-                    if field != "declared_price":
-                        continue  # 核价管理字段属于本系统记录，不写入官方商品模板
-                    field = "price"
+                if field == "declared_price":
+                    continue  # 旧 CSV/草稿快照不能覆盖网页最终确认的 price
+                if field in {"shein_feedback_price", "pricing_status", "pricing_note"}:
+                    continue  # 核价管理字段属于本系统记录，不写入官方商品模板
                 col = columns.get(field)
                 if col is None:
                     continue  # 未在官方第2-6行声明的输入不写入模板，也不制造第7行表头
