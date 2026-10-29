@@ -1,7 +1,7 @@
 import io
 from openpyxl import Workbook, load_workbook
 from fastapi.testclient import TestClient
-from app.main import app, validate, export_workbook, prepare_products, TemplateError
+from app.main import app, validate, export_workbook, prepare_products, TemplateError, verify_export
 
 client = TestClient(app)
 
@@ -63,6 +63,11 @@ def test_three_category_sheets_and_cost_price():
         assert wb[name]["D7"].value == 200
         assert wb[name]["A7"].value in {"S1","S2","S3"}
         assert wb[name]["A2"].value == "supplier_sku"
+
+def test_export_readback_verification():
+    rows=[{"category":"女士短连衣裙","title":"A","description_en":"D","sku":"S1","price":"200.00","color":"Red","size":"M","stock":"1","image_url":"https://x"}]
+    template=template_bytes(); result=export_workbook(template, rows)
+    assert verify_export(template, result, rows) == []
 
 def test_missing_category_sheet_blocks_export():
     wb=Workbook(); wb.active.title="女士短连衣裙 67-1727"; b=io.BytesIO(); wb.save(b)
