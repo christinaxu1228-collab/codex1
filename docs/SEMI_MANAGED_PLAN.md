@@ -12,7 +12,7 @@
 
 ## 必接接口（按官方文档重新确认）
 - GET /open-api/goods/product/check-publish-permission —— 发品资格
-- POST /open-api/goods-goods-publish-quotas/detail 请勿使用此拼写；**正确路径** /open-api/goods-publish-quotas/detail —— 发品额度；确认 HTTP 方法及权限后接入
+- /open-api/goods-publish-quotas/detail —— 发品额度；确认 HTTP 方法及权限后接入
 - POST /open-api/goods/query-publish-fill-in-standard —— 动态字段规范、语言、供货币种、图片支持
 - /open-api/goods/query-category-tree —— 可售类目、product_type_id
 - /open-api/goods/query-attribute-template —— 类目属性
