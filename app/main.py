@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io, json, re, tempfile
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,8 @@ CATEGORIES = {
 }
 REQUIRED = ["category", "title", "description_en", "sku", "color", "size", "price", "stock", "image_url"]
 SENSITIVE = ["fake", "replica", "counterfeit", "仿牌", "假货", "毒品", "weapon"]
+DEFAULT_DECLARED_PRICE = Decimal("200.00")
+PRICE_STATUSES = ["待提交", "已提交，待核价", "核价通过", "核价未通过", "需要调整报价"]
 
 def category_for_sheet(title: str) -> str | None:
     value = title.lower()
@@ -40,6 +43,29 @@ def parse_products(raw: bytes, filename: str) -> list[dict[str, Any]]:
 def normalize(row: dict[str, Any]) -> dict[str, Any]:
     aliases = {"标题":"title", "商品标题":"title", "英文描述":"description_en", "描述":"description_en", "货号":"sku", "颜色":"color", "尺码":"size", "供货价":"price", "价格":"price", "库存":"stock", "图片链接":"image_url", "类目":"category"}
     return {aliases.get(str(k).strip(), str(k).strip()): ("" if v is None else v) for k, v in row.items()}
+
+def money(value: Any, default: Decimal = DEFAULT_DECLARED_PRICE) -> str:
+    """Return a two-decimal declared supplier price; blank values use the default."""
+    if value is None or not str(value).strip(): value = default
+    try:
+        amount = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return str(value)
+    return f"{amount:.2f}"
+
+def prepare_products(products: list[dict[str, Any]], default_price: Any = DEFAULT_DECLARED_PRICE) -> list[dict[str, Any]]:
+    try: fallback = Decimal(str(default_price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError): fallback = DEFAULT_DECLARED_PRICE
+    prepared = []
+    for source in products:
+        row = normalize(source)
+        row["price"] = money(row.get("price"), fallback)
+        row.setdefault("declared_price", row["price"])
+        row.setdefault("shein_feedback_price", "")
+        row.setdefault("pricing_status", "待提交")
+        row.setdefault("pricing_note", "")
+        prepared.append(row)
+    return prepared
 
 def validate(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
     errors = []; seen = set()
@@ -74,11 +100,21 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
         for offset, product in enumerate(by_category.get(category, [])):
             target = start + 1 + offset
             for field, value in product.items():
-                col = headers.get(field) or headers.get(field.replace("_", " "))
+                if field in {"declared_price", "shein_feedback_price", "pricing_status", "pricing_note"}:
+                    if field != "declared_price":
+                        continue  # 核价管理字段属于本系统记录，不写入官方商品模板
+                    field = "price"
+                col = headers.get(field) or headers.get(field.replace("_", " ")) or headers.get("供货价")
                 if col is None:
                     # 仅在模板没有字段时追加列，保留既有格式
                     col = max(headers.values(), default=0) + 1; headers[field] = col; ws.cell(start, col, field)
-                ws.cell(target, col, value)
+                if field in {"declared_price", "price"}: value = money(value)
+                ws.cell(target, col, float(value) if field in {"declared_price", "price"} and str(value).replace('.', '', 1).isdigit() else value)
+                if field in {"declared_price", "price"}: ws.cell(target, col).number_format = "0.00"
+            # Fill a template currency column only when the official sheet exposes one.
+            for currency_name in ("币种", "Currency", "currency"):
+                if currency_name in headers and not ws.cell(target, headers[currency_name]).value:
+                    ws.cell(target, headers[currency_name], "USD")
     output = io.BytesIO(); wb.save(output); output.seek(0); return output.getvalue()
 
 @app.get("/", response_class=HTMLResponse)
@@ -91,13 +127,13 @@ async def inspect_template(template: UploadFile = File(...)):
     return {"sheets": detect_sheets(wb), "categories": CATEGORIES}
 
 @app.post("/api/validate")
-async def validate_products(products: UploadFile = File(...)):
-    rows = parse_products(await products.read(), products.filename or "products.csv")
-    return {"count": len(rows), "errors": validate(rows), "preview": [normalize(r) for r in rows[:20]]}
+async def validate_products(products: UploadFile = File(...), default_price: str = Form("200.00")):
+    rows = prepare_products(parse_products(await products.read(), products.filename or "products.csv"), default_price)
+    return {"count": len(rows), "errors": validate(rows), "preview": rows[:20], "pricing_statuses": PRICE_STATUSES}
 
 @app.post("/api/export")
-async def export(template: UploadFile = File(...), products: UploadFile = File(...)):
-    template_bytes = await template.read(); rows = parse_products(await products.read(), products.filename or "products.csv")
+async def export(template: UploadFile = File(...), products: UploadFile = File(...), default_price: str = Form("200.00")):
+    template_bytes = await template.read(); rows = prepare_products(parse_products(await products.read(), products.filename or "products.csv"), default_price)
     errors = validate(rows)
     if errors: return {"ok": False, "errors": errors, "preview": [normalize(r) for r in rows[:20]]}
     result = export_workbook(template_bytes, rows)
