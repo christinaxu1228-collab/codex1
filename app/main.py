@@ -29,7 +29,7 @@ FIELD_CANDIDATES = {
     "title": ["default_product_name[en]", "product_name[en]", "商品名称", "商品标题", "title"],
     "description_en": ["default_product_desc[en]", "product_desc[en]", "英文描述", "description_en", "描述"],
     "price": ["cost", "申报供货价", "供货价", "supplier_cost", "price"],
-    "image_url": ["main_image", "image", "商品图片", "图片链接", "image_url", "product_image"],
+    "image_url": ["main_image", "main_img", "image", "商品图片", "图片链接", "image_url", "product_image"],
     "color": ["color", "颜色", "主规格", "颜色名称"],
     "size": ["size", "尺码", "尺码名称"],
     "stock": ["warehouse_stock", "stock", "库存", "仓库库存"],
@@ -82,13 +82,14 @@ def prepare_products(products: list[dict[str, Any]], default_price: Any = DEFAUL
         prepared.append(row)
     return prepared
 
-def validate(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def validate(products: list[dict[str, Any]], required_fields: list[str] | None = None) -> list[dict[str, Any]]:
     errors = []; seen = set()
+    required_fields = required_fields if required_fields is not None else REQUIRED
     for i, source in enumerate(products, 1):
         row = normalize(source); sku = str(row.get("sku", "")).strip()
         if str(row.get("category", "")).strip() not in CATEGORIES:
             errors.append({"row": i, "field": "category", "message": "商品类目必须是支持的三个女装类目"})
-        for field in REQUIRED:
+        for field in required_fields:
             if not str(row.get(field, "")).strip(): errors.append({"row": i, "field": field, "message": "必填项为空"})
         if sku and sku in seen: errors.append({"row": i, "field": "sku", "message": "重复 SKU"})
         if sku: seen.add(sku)
@@ -109,10 +110,28 @@ def template_columns(ws) -> dict[str, int]:
     for col in range(1, ws.max_column + 1):
         labels = [str(ws.cell(row, col).value or "").strip() for row in (2, 3, 4, 5, 6)]
         normalized = {label.lower() for label in labels if label}
+        identifier = str(ws.cell(3, col).value or "").strip()
+        if identifier:
+            if identifier.startswith("stock["): values.setdefault("stock", col)
+            elif identifier.startswith("main_img"): values.setdefault("image_url", col)
+            elif identifier.startswith("detail_img") or identifier in {"square_img", "piece_img", "sku_image"}: values.setdefault("image_url", col)
+            elif identifier.startswith("attr_") or identifier in {"main_attribute", "main_attribute_value", "supplier_code", "supplier_sku"}:
+                values.setdefault(identifier, col)
         for field, candidates in FIELD_CANDIDATES.items():
             if any(candidate.lower() in normalized for candidate in candidates):
                 values[field] = col
     return values
+
+def template_required_fields(ws) -> list[str]:
+    columns = template_columns(ws); required = []
+    for col in range(1, ws.max_column + 1):
+        if str(ws.cell(4, col).value or "").strip() != "必填": continue
+        identifier = str(ws.cell(3, col).value or "").strip()
+        field = identifier
+        for candidate, names in FIELD_CANDIDATES.items():
+            if identifier in names: field = candidate
+        if field not in required: required.append(field)
+    return required
 
 def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
     wb = load_workbook(io.BytesIO(template))
@@ -133,6 +152,10 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
         category_products = sorted(by_category.get(category, []), key=lambda p: (str(p.get("supplier_code", "")), str(p.get("sku", ""))))
         for offset, product in enumerate(category_products):
             target = 7 + offset
+            for required in template_required_fields(ws):
+                if required in {"supplier_sku", "sku"}: required = "sku"
+                if not str(product.get(required, "")).strip():
+                    raise TemplateError(f"工作表“{ws.title}”第 {target} 行缺少必填字段：{required}（请按第2-6行填写要求补充）")
             for field, value in product.items():
                 if field in {"declared_price", "shein_feedback_price", "pricing_status", "pricing_note"}:
                     if field != "declared_price":
@@ -195,7 +218,7 @@ async def validate_products(products: UploadFile = File(...), default_price: str
 @app.post("/api/export")
 async def export(template: UploadFile = File(...), products: UploadFile = File(...), default_price: str = Form("200.00")):
     template_bytes = await template.read(); rows = prepare_products(parse_products(await products.read(), products.filename or "products.csv"), default_price)
-    errors = validate(rows)
+    errors = validate(rows, ["category", "title", "description_en", "price"])
     if errors: return {"ok": False, "errors": errors, "preview": rows[:20]}
     try: result = export_workbook(template_bytes, rows)
     except TemplateError as exc: return {"ok": False, "errors": [{"row": 0, "field": "template", "message": str(exc)}], "preview": rows[:20]}
