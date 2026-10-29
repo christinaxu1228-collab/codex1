@@ -92,6 +92,9 @@ def prepare_products(products: list[dict[str, Any]], default_price: Any = DEFAUL
     for source in products:
         row = normalize(source)
         row["price"] = money(row.get("price"), fallback)
+        # Keep legacy drafts usable while preserving any explicitly edited value.
+        row.setdefault("main_attribute", "颜色")
+        row.setdefault("main_attribute_value", row.get("color", ""))
         row.setdefault("declared_price", row["price"])
         row.setdefault("shein_feedback_price", "")
         row.setdefault("pricing_status", "待提交")
