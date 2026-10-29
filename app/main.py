@@ -48,6 +48,23 @@ def category_for_sheet(title: str) -> str | None:
 def detect_sheets(wb) -> list[dict[str, str]]:
     return [{"sheet": ws.title, "category": category_for_sheet(ws.title) or "未识别"} for ws in wb.worksheets]
 
+def template_metadata(wb) -> dict[str, Any]:
+    valid = wb["有效属性值"] if "有效属性值" in wb.sheetnames else None
+    options: dict[str, dict[str, list[str]]] = {}
+    if valid:
+        for r in range(3, valid.max_row + 1):
+            category, _, label = (str(valid.cell(r, c).value or "").strip() for c in (1, 2, 3))
+            if category not in CATEGORIES or not label: continue
+            field = {"颜色": "main_attribute_value", "尺寸": "secondary_attribute_1_value", "面料弹性": "attr_39", "材质": "attr_160"}.get(label)
+            if field:
+                values = [str(valid.cell(r, c).value).strip() for c in range(6, valid.max_column + 1) if valid.cell(r, c).value not in (None, "")]
+                options.setdefault(category, {}).setdefault(field, []).extend(values)
+    result = {}
+    for ws in wb.worksheets:
+        category = category_for_sheet(ws.title)
+        if category: result[category] = {"sheet": ws.title, "required": template_required_fields(ws), "options": options.get(category, {})}
+    return result
+
 def parse_products(raw: bytes, filename: str) -> list[dict[str, Any]]:
     if filename.lower().endswith(".json"):
         data = json.loads(raw.decode("utf-8-sig")); return data if isinstance(data, list) else data.get("products", [])
@@ -207,8 +224,8 @@ def index():
 
 @app.post("/api/inspect")
 async def inspect_template(template: UploadFile = File(...)):
-    wb = load_workbook(io.BytesIO(await template.read()), read_only=True)
-    return {"sheets": detect_sheets(wb), "categories": CATEGORIES}
+    wb = load_workbook(io.BytesIO(await template.read()), read_only=False)
+    return {"sheets": detect_sheets(wb), "categories": CATEGORIES, "metadata": template_metadata(wb)}
 
 @app.post("/api/validate")
 async def validate_products(products: UploadFile = File(...), default_price: str = Form("200.00")):
