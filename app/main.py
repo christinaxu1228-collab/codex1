@@ -173,12 +173,15 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
             raise TemplateError(f"工作表“{ws.title}”缺少官方 SKU 或 cost/供货价字段（请检查第2-6行）")
         # 同一货号的多个 SKU 相邻写入，稳定排序且不生成新货号。
         category_products = sorted(by_category.get(category, []), key=lambda p: (str(p.get("supplier_code", "")), str(p.get("sku", ""))))
+        valid_materials = set(template_metadata(wb).get(category, {}).get("options", {}).get("attr_160", []))
         for offset, product in enumerate(category_products):
             target = 7 + offset
             for required in template_required_fields(ws):
                 if required in {"supplier_sku", "sku"}: required = "sku"
                 if not str(product.get(required, "")).strip():
                     raise TemplateError(f"工作表“{ws.title}”第 {target} 行缺少必填字段：{required}（请按第2-6行填写要求补充）")
+            if product.get("attr_160") and valid_materials and product["attr_160"] not in valid_materials:
+                raise TemplateError(f"工作表“{ws.title}”第 {target} 行材质不在官方有效属性值中：{product['attr_160']}；请以模板“有效属性值”表为准")
             for field, value in product.items():
                 if field in {"declared_price", "shein_feedback_price", "pricing_status", "pricing_note"}:
                     if field != "declared_price":
