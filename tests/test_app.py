@@ -1,5 +1,8 @@
 import io
+import asyncio
+from pathlib import Path
 from openpyxl import Workbook, load_workbook
+import app.main as main
 from app.main import validate, export_workbook, prepare_products, TemplateError, verify_export, index
 
 def test_validation_duplicate_and_required():
@@ -76,3 +79,16 @@ def test_missing_category_sheet_blocks_export():
 def test_inspect_endpoint():
     html = index()
     assert "SHEIN" in html and "默认申报供货价" in html
+
+def test_draft_save_and_reload_preserves_edits(tmp_path):
+    original_path = main.DB_PATH
+    try:
+        main.DB_PATH = Path(tmp_path) / "drafts.sqlite3"
+        main.init_db()
+        rows = [{"sku": "SKU-1", "supplier_code": "SPU-1", "price": "200.00", "pricing_status": "需要调整报价", "pricing_note": "保留备注", "attr_160": "棉"}]
+        result = asyncio.run(main.save_drafts({"products": rows}))
+        assert result == {"saved": 1}
+        restored = main.load_drafts()["products"]
+        assert restored == rows
+    finally:
+        main.DB_PATH = original_path
