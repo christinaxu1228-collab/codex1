@@ -1,9 +1,3 @@
 __pycache__/
-*.py[cod]
+*.pyc
 .venv/
-.env
-.env.*
-!.env.example
-*.xlsx
-report.json
-.DS_Store
