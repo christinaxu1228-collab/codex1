@@ -150,3 +150,29 @@ def test_png_dimension_parser_and_image_rules():
     assert main.validate_image_for_field(asset, "main_img") == []
     assert main.validate_image_for_field({**asset, "width":80, "height":80}, "main_img")
 
+def image_template_with_slots():
+    wb = load_workbook(io.BytesIO(full_template_bytes()))
+    for ws in [wb[x] for x in ["女士两件套 95-1780", "女士短连衣裙 67-1727", "女士连体裤 154-1860"]]:
+        for col, field in enumerate(["main_img", "detail_img_1", "detail_img_2"], 9):
+            ws.cell(2, col, field); ws.cell(3, col, field)
+    b = io.BytesIO(); wb.save(b); return b.getvalue()
+
+def test_display_images_require_two_and_map_in_user_order():
+    base = {"category":"女士短连衣裙", "sku":"IMG-2", "title":"A", "description_en":"D", "price":"200", "color":"黑色", "size":"M", "stock":"1"}
+    one = {**base, "images":{"display":["https://cdn.example/a.jpg"]}}
+    try:
+        export_workbook(image_template_with_slots(), [one])
+        assert False, "one display image should be rejected"
+    except TemplateError as exc:
+        assert "少于 2 张" in str(exc)
+    two = {**base, "images":{"display":["https://cdn.example/a.jpg", "https://cdn.example/b.jpg"]}}
+    result = export_workbook(image_template_with_slots(), [two])
+    ws = load_workbook(io.BytesIO(result))["女士短连衣裙 67-1727"]
+    assert ws["I7"].value == "https://cdn.example/a.jpg"
+    assert ws["J7"].value == "https://cdn.example/b.jpg"
+
+def test_display_image_asset_requires_three_four_ratio_but_no_fixed_category():
+    asset = {"url":"https://cdn.example/a.jpg", "width":1000, "height":1000, "mime":"image/jpeg", "size":100}
+    errors = main.validate_image_for_field(asset, "main_img")
+    assert any("3:4" in error for error in errors)
+
