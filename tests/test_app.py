@@ -211,6 +211,11 @@ def test_frontend_image_layout_supports_two_five_and_ten_images():
     assert "data-del-img" in html and "draggable=\"true\"" in html
     # The client maps an arbitrary-length display array; no 5/8/10 cap is encoded.
     assert "imgs.map((a,n)" in html and "slice(0,5)" not in html and "slice(0,10)" not in html
+    assert "class=\"table-scroll\"" in html and "class=\"product-table\"" in html
+    assert "id=\"imageManager\"" in html and "function selectProduct" in html
+    assert "onclick=\"selectProduct('+i+')\"" in html
+    # Image controls are rendered below the table, so image thumbnails cannot add table cells or row height.
+    assert "<td class=\"img-cell\">" not in html
 
 def test_embedded_frontend_javascript_has_no_syntax_error(tmp_path):
     node = shutil.which("node")
