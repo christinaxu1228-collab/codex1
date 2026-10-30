@@ -176,3 +176,27 @@ def test_display_image_asset_requires_three_four_ratio_but_no_fixed_category():
     errors = main.validate_image_for_field(asset, "main_img")
     assert any("3:4" in error for error in errors)
 
+def test_external_url_import_rejects_private_hosts():
+    ok, message = main.public_https_url("https://127.0.0.1/image.png")
+    assert not ok and "禁止访问" in message
+
+def test_external_url_import_keeps_download_and_official_status_separate(monkeypatch):
+    asset = {"id":"x.png", "url":"https://img.example/x.png", "mime":"image/png", "size":100,
+             "width":900, "height":1200, "path":"product_images/x.png"}
+    async def fake_download(url): return ({**asset, "source_url": url, "official_url_status": "待确认"}, None)
+    monkeypatch.setattr(main, "download_external_image", fake_download)
+    result = asyncio.run(main.import_image_urls({"items":[{"sku":"SKU-IMG","url":"https://img.example/x.png"}]}))
+    assert result["ok"] and result["assets"][0]["official_url_status"] == "待确认"
+    assert any("正式认可" in error for error in result["assets"][0]["quality_errors"])
+
+def test_external_image_csv_maps_sku_url_and_order(monkeypatch):
+    asset = {"id":"x.png", "url":"https://img.example/x.png", "mime":"image/png", "size":100,
+             "width":900, "height":1200, "path":"product_images/x.png"}
+    async def fake_download(url): return ({**asset, "source_url": url, "official_url_status": "待确认"}, None)
+    monkeypatch.setattr(main, "download_external_image", fake_download)
+    class FakeUpload:
+        async def read(self): return "SKU,图片 URL,图片顺序\nS-1,https://img.example/x.png,2\n".encode()
+    csv_file = FakeUpload()
+    result = asyncio.run(main.import_image_csv(csv_file))
+    assert result["assets"][0]["sku"] == "S-1" and result["assets"][0]["order"] == "2"
+
