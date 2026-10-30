@@ -1,6 +1,8 @@
 import io
 import asyncio
 import struct
+import shutil
+import subprocess
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
 import app.main as main
@@ -209,4 +211,15 @@ def test_frontend_image_layout_supports_two_five_and_ten_images():
     assert "data-del-img" in html and "draggable=\"true\"" in html
     # The client maps an arbitrary-length display array; no 5/8/10 cap is encoded.
     assert "imgs.map((a,n)" in html and "slice(0,5)" not in html and "slice(0,10)" not in html
+
+def test_embedded_frontend_javascript_has_no_syntax_error(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        return
+    html = index()
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    js = tmp_path / "frontend.js"
+    js.write_text(script, encoding="utf-8")
+    result = subprocess.run([node, "--check", str(js)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
