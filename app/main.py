@@ -156,6 +156,10 @@ def template_image_fields(ws) -> list[str]:
             if str(ws.cell(3, col).value or "").strip() in {"main_img", "square_img", "piece_img", "sku_image"}
             or str(ws.cell(3, col).value or "").strip().startswith("detail_img_")]
 
+def template_display_fields(ws) -> list[str]:
+    """Generic 3:4 display slots; special square/color/SKU slots stay optional."""
+    return [field for field in template_image_fields(ws) if field == "main_img" or field.startswith("detail_img_")]
+
 def template_image_rules(ws) -> dict[str, str]:
     rules = {}
     for col in range(1, ws.max_column + 1):
@@ -273,7 +277,7 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
             if product.get("attr_160") and valid_materials and product["attr_160"] not in valid_materials:
                 raise TemplateError(f"工作表“{ws.title}”第 {target} 行材质不在官方有效属性值中：{product['attr_160']}；请以模板“有效属性值”表为准")
             image_values = product_images_in_order(product)
-            image_fields = template_image_fields(ws)
+            image_fields = template_display_fields(ws)
             if image_fields:
                 if len(image_fields) > 1 and len(image_values) < 2:
                     raise TemplateError(f"工作表“{ws.title}”第 {target} 行商品展示图片少于 2 张；无需提供固定的正面、侧面、背面或材质图")
@@ -296,9 +300,9 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
                 ws.cell(target, col, float(value) if field == "price" and str(value).replace('.', '', 1).isdigit() else value)
                 if field == "price": ws.cell(target, col).number_format = "0.00"
             # 图片必须使用模板声明的字段，并且只能写公开 URL；本地上传文件仅作为草稿资产保存。
-            if template_image_fields(ws):
+            if template_display_fields(ws):
                 for index, image in enumerate(product_images_in_order(product)):
-                    ws.cell(target, columns[template_image_fields(ws)[index]], image_url(image))
+                    ws.cell(target, columns[template_display_fields(ws)[index]], image_url(image))
             # Fill a template currency column only when the official sheet exposes one.
             for col in range(1, ws.max_column + 1):
                 label = str(ws.cell(2, col).value or ws.cell(3, col).value or "").lower()
