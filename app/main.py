@@ -176,6 +176,20 @@ def product_image_values(product: dict[str, Any], field: str) -> list[Any]:
     if isinstance(value, list): return value
     return [value] if value not in (None, "") else []
 
+def product_images_in_order(product: dict[str, Any]) -> list[Any]:
+    """Flatten the user's ordered display-image collection without imposing categories."""
+    images = product.get("images") or {}
+    values: list[Any] = []
+    if isinstance(images, dict):
+        for value in images.values():
+            values.extend(value if isinstance(value, list) else [value])
+    elif isinstance(images, list):
+        values.extend(images)
+    if not values and product.get("image_url"):
+        value = product["image_url"]
+        values.extend(value if isinstance(value, list) else [value])
+    return [value for value in values if value not in (None, "")]
+
 def validate_image_asset(asset: dict[str, Any]) -> list[str]:
     errors = []
     mime = str(asset.get("mime", "")).lower()
@@ -215,11 +229,9 @@ def validate_image_for_field(asset: Any, field: str) -> list[str]:
     errors = validate_image_asset(asset if isinstance(asset, dict) else {})
     try: w, h = int(asset["width"]), int(asset["height"])
     except (KeyError, TypeError, ValueError): return errors
-    if field == "piece_img" and (w, h) != (80, 80): errors.append("色块图需要 80 x 80 px")
-    elif field == "square_img" and (w != h or not 900 <= w <= 2200): errors.append("方块图需要 900 x 900 至 2200 x 2200 px")
-    elif field in {"main_img", "sku_image"} or field.startswith("detail_img_"):
+    if field in {"main_img", "square_img", "piece_img", "sku_image"} or field.startswith("detail_img_"):
         ratio = w / h if h else 0
-        if not (900 <= w <= 2200 and 900 <= h <= 2200 and 0.75 <= ratio <= 1): errors.append("图片需为 900-2200 px，宽高比例 3:4 至 1:1")
+        if abs(ratio - 0.75) > 0.01: errors.append("商品展示图需要 3:4 比例（允许少量误差）")
     if not image_url(asset): errors.append("尚未获得公开图片 URL，不能写入正式 XLSX")
     return errors
 
@@ -260,14 +272,18 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
                     raise TemplateError(f"工作表“{ws.title}”第 {target} 行缺少必填字段：{required}（请按第2-6行填写要求补充）")
             if product.get("attr_160") and valid_materials and product["attr_160"] not in valid_materials:
                 raise TemplateError(f"工作表“{ws.title}”第 {target} 行材质不在官方有效属性值中：{product['attr_160']}；请以模板“有效属性值”表为准")
-            for image_field in template_image_fields(ws):
-                image_values = product_image_values(product, image_field)
-                if len(image_values) > 1:
-                    raise TemplateError(f"工作表“{ws.title}”第 {target} 行图片字段 {image_field} 只能填写一个链接")
-                for image in image_values:
+            image_values = product_images_in_order(product)
+            image_fields = template_image_fields(ws)
+            if image_fields:
+                if len(image_fields) > 1 and len(image_values) < 2:
+                    raise TemplateError(f"工作表“{ws.title}”第 {target} 行商品展示图片少于 2 张；无需提供固定的正面、侧面、背面或材质图")
+                if len(image_values) > len(image_fields):
+                    raise TemplateError(f"工作表“{ws.title}”第 {target} 行有 {len(image_values)} 张图片，但当前官方模板只有 {len(image_fields)} 个图片字段；请更换模板或减少图片")
+                for index, image in enumerate(image_values):
+                    image_field = image_fields[index]
                     image_errors = validate_image_for_field(image, image_field)
                     if image_errors:
-                        raise TemplateError(f"工作表“{ws.title}”第 {target} 行 {image_field}：" + "；".join(image_errors))
+                        raise TemplateError(f"工作表“{ws.title}”第 {target} 行第 {index + 1} 张商品展示图：" + "；".join(image_errors))
             for field, value in product.items():
                 if field == "declared_price":
                     continue  # 旧 CSV/草稿快照不能覆盖网页最终确认的 price
@@ -280,10 +296,9 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
                 ws.cell(target, col, float(value) if field == "price" and str(value).replace('.', '', 1).isdigit() else value)
                 if field == "price": ws.cell(target, col).number_format = "0.00"
             # 图片必须使用模板声明的字段，并且只能写公开 URL；本地上传文件仅作为草稿资产保存。
-            for image_field in template_image_fields(ws):
-                values = product_image_values(product, image_field)
-                if values:
-                    ws.cell(target, columns[image_field], image_url(values[0]))
+            if template_image_fields(ws):
+                for index, image in enumerate(product_images_in_order(product)):
+                    ws.cell(target, columns[template_image_fields(ws)[index]], image_url(image))
             # Fill a template currency column only when the official sheet exposes one.
             for col in range(1, ws.max_column + 1):
                 label = str(ws.cell(2, col).value or ws.cell(3, col).value or "").lower()
@@ -347,9 +362,7 @@ async def export(template: UploadFile = File(...), products: UploadFile = File(.
 @app.post("/api/images/upload")
 async def upload_images(files: list[UploadFile] = File(...), sku: str = Form(""), supplier_code: str = Form(""), image_type: str = Form("main_img")):
     """Persist uploaded assets for drafts. No public URL is fabricated."""
-    allowed_types = {"main_img", "square_img", "piece_img", "sku_image"} | {f"detail_img_{i}" for i in range(1, 11)}
-    if image_type not in allowed_types:
-        return {"ok": False, "errors": [{"message": "图片分类必须来自官方模板字段"}]}
+    image_type = image_type.strip() or "display"
     assets, errors = [], []
     for upload in files:
         raw = await upload.read()
@@ -367,7 +380,7 @@ async def upload_images(files: list[UploadFile] = File(...), sku: str = Form("")
         asset = {"id": asset_id, "filename": upload.filename or asset_id, "path": str(path.relative_to(IMAGE_DIR.parent)),
                  "url": "", "mime": mime, "size": len(raw), "width": width, "height": height,
                  "sku": sku.strip() or Path(upload.filename or "").stem, "supplier_code": supplier_code.strip(), "image_type": image_type}
-        asset_errors = validate_image_for_field(asset, image_type)
+        asset_errors = validate_image_for_field(asset, "main_img")
         if asset_errors: asset["warnings"] = asset_errors
         assets.append(asset)
     return {"ok": not errors, "assets": assets, "errors": errors,
