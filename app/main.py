@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import io, json, re, tempfile, sqlite3, uuid
+import io, json, re, tempfile, sqlite3, uuid, socket, ipaddress
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
@@ -9,6 +9,7 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
+import httpx
 
 app = FastAPI(title="SHEIN 半托管女装批量上品", version="1.0.0")
 BASE = Path(__file__).parent
@@ -231,6 +232,8 @@ def validate_image_for_field(asset: Any, field: str) -> list[str]:
         if not re.match(r"^https?://\S+$", asset): return ["必须是可访问的 http/https 图片链接；本地文件不能直接导出"]
         return []
     errors = validate_image_asset(asset if isinstance(asset, dict) else {})
+    if isinstance(asset, dict) and asset.get("official_url_status") not in (None, "通过"):
+        errors.append("外部图片已下载但尚未确认是 SHEIN 正式认可图片地址")
     try: w, h = int(asset["width"]), int(asset["height"])
     except (KeyError, TypeError, ValueError): return errors
     if field in {"main_img", "square_img", "piece_img", "sku_image"} or field.startswith("detail_img_"):
@@ -238,6 +241,46 @@ def validate_image_for_field(asset: Any, field: str) -> list[str]:
         if abs(ratio - 0.75) > 0.01: errors.append("商品展示图需要 3:4 比例（允许少量误差）")
     if not image_url(asset): errors.append("尚未获得公开图片 URL，不能写入正式 XLSX")
     return errors
+
+def public_https_url(value: str) -> tuple[bool, str]:
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(value.strip())
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            return False, "只允许不含账号信息的 HTTPS 图片 URL"
+        host = parsed.hostname
+        addresses = {item[4][0] for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
+        for address in addresses:
+            ip = ipaddress.ip_address(address)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+                return False, "禁止访问本机、内网、保留地址或云服务元数据地址"
+        return True, ""
+    except Exception:
+        return False, "无法解析公网地址"
+
+async def download_external_image(url: str) -> tuple[dict[str, Any] | None, str | None]:
+    allowed, reason = public_https_url(url)
+    if not allowed: return None, reason
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=15.0, headers={"User-Agent": "SHEIN-product-image-import/1.0"}) as client:
+            response = await client.get(url)
+        if response.status_code < 200 or response.status_code >= 300:
+            return None, f"图片 URL 返回 HTTP {response.status_code}"
+        raw = response.content
+        if len(raw) > 3 * 1024 * 1024: return None, "图片大小不能超过 3MB"
+        width, height, mime = image_dimensions(raw, Path(url).suffix.lower())
+        if mime not in {"image/jpeg", "image/png", "image/webp"}:
+            return None, "响应内容不是支持的 JPG、PNG 或 WebP 图片"
+        asset_id = uuid.uuid4().hex + {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[mime]
+        (IMAGE_DIR / asset_id).write_bytes(raw)
+        asset = {"id": asset_id, "filename": Path(url).name or asset_id, "path": str((IMAGE_DIR / asset_id).relative_to(IMAGE_DIR.parent)),
+                 "url": url, "source_url": url, "official_url_status": "待确认", "mime": mime,
+                 "size": len(raw), "width": width, "height": height, "image_type": "display"}
+        return asset, None
+    except httpx.HTTPError as exc:
+        return None, f"下载失败：{exc.__class__.__name__}"
+    except Exception as exc:
+        return None, f"无法解析实际图片内容：{exc}"
 
 def template_required_fields(ws) -> list[str]:
     columns = template_columns(ws); required = []
@@ -389,6 +432,40 @@ async def upload_images(files: list[UploadFile] = File(...), sku: str = Form("")
         assets.append(asset)
     return {"ok": not errors, "assets": assets, "errors": errors,
             "notice": "图片已持久化保存，但尚未获得公开 URL；正式 XLSX 导出前必须补充 SHEIN 接受的图片链接。"}
+
+@app.post("/api/images/import-urls")
+async def import_image_urls(payload: dict[str, Any]):
+    """Download user-authorized public image URLs; assets remain pending official review."""
+    items = payload.get("items", payload.get("urls", []))
+    if isinstance(items, str): items = [line.strip() for line in items.splitlines() if line.strip()]
+    results, errors = [], []
+    for index, item in enumerate(items if isinstance(items, list) else [], 1):
+        if isinstance(item, str): item = {"url": item}
+        url = str(item.get("url", "")).strip(); sku = str(item.get("sku", "")).strip()
+        if not url: errors.append({"row": index, "message": "缺少图片 URL"}); continue
+        asset, reason = await download_external_image(url)
+        if reason:
+            errors.append({"row": index, "sku": sku, "url": url, "message": reason}); continue
+        asset.update({"sku": sku, "supplier_code": str(item.get("supplier_code", "")).strip(), "order": item.get("order", index)})
+        quality = validate_image_for_field(asset, "main_img")
+        asset["quality_errors"] = quality
+        results.append(asset)
+    return {"ok": not errors, "assets": results, "errors": errors,
+            "notice": "下载成功不等于 SHEIN 正式图片地址校验通过；导出前必须完成官方地址确认。"}
+
+@app.post("/api/images/import-csv")
+async def import_image_csv(file: UploadFile = File(...)):
+    import csv
+    try:
+        text = (await file.read()).decode("utf-8-sig")
+        rows = list(csv.DictReader(io.StringIO(text)))
+    except Exception as exc:
+        return {"ok": False, "assets": [], "errors": [{"message": f"CSV 读取失败：{exc}"}]}
+    items = [{"sku": row.get("SKU") or row.get("sku") or row.get("卖家 SKU") or "",
+              "supplier_code": row.get("商品货号") or row.get("supplier_code") or row.get("货号") or "",
+              "url": row.get("图片 URL") or row.get("image_url") or row.get("url") or row.get("图片链接") or "",
+              "order": row.get("图片顺序") or row.get("order") or i} for i, row in enumerate(rows, 1)]
+    return await import_image_urls({"items": items})
 
 @app.post("/api/drafts")
 async def save_drafts(payload: dict[str, Any]):
