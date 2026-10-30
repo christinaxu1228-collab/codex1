@@ -1,9 +1,6 @@
 __pycache__/
-*.py[cod]
+*.pyc
 .venv/
-.env
-.env.*
-!.env.example
-*.xlsx
-report.json
-.DS_Store
+
+shein_drafts.sqlite3
+product_images/
