@@ -200,3 +200,13 @@ def test_external_image_csv_maps_sku_url_and_order(monkeypatch):
     result = asyncio.run(main.import_image_csv(csv_file))
     assert result["assets"][0]["sku"] == "S-1" and result["assets"][0]["order"] == "2"
 
+def test_frontend_image_layout_supports_two_five_and_ten_images():
+    html = index()
+    assert "width:120px;height:160px" in html
+    assert "max-width:120px;max-height:160px;object-fit:contain" in html
+    assert "overflow-x:auto" in html and "image-strip" in html
+    assert "imagePreviewDialog.showModal()" in html
+    assert "data-del-img" in html and "draggable=\"true\"" in html
+    # The client maps an arbitrary-length display array; no 5/8/10 cap is encoded.
+    assert "imgs.map((a,n)" in html and "slice(0,5)" not in html and "slice(0,10)" not in html
+
