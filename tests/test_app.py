@@ -3,6 +3,8 @@ import asyncio
 import struct
 import shutil
 import subprocess
+import json
+import httpx
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
 import app.main as main
@@ -227,4 +229,30 @@ def test_embedded_frontend_javascript_has_no_syntax_error(tmp_path):
     js.write_text(script, encoding="utf-8")
     result = subprocess.run([node, "--check", str(js)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+def test_validate_loaded_draft_without_csv_keeps_price_and_images():
+    row = {"sku":"TEST-SET-001", "category":"女士两件套", "title":"Set", "description_en":"A set",
+           "price":"200.00", "attr_39":"低弹", "images":{"display":[{"url":"https://example.com/a.jpg"}]}}
+    result = asyncio.run(main.validate_draft(json.dumps([row]), "200.00", None))
+    assert result["count"] == 1 and result["preview"][0]["price"] == "200.00"
+    assert result["preview"][0]["images"] == row["images"]
+
+def test_validate_selected_sku_and_template_category_mismatch():
+    wb = Workbook(); wb.active.title = "女士两件套(95-1780)"
+    data = io.BytesIO(); wb.save(data)
+    class FakeUpload:
+        async def read(self): return data.getvalue()
+    selected = [{"sku":"TEST-SET-001", "category":"女士两件套", "title":"Set", "description_en":"Set", "price":"200.00"}]
+    okay = asyncio.run(main.validate_draft(json.dumps(selected), "200.00", FakeUpload()))
+    assert okay["count"] == 1 and not any(e["field"] == "category" for e in okay["errors"])
+    other = [{**selected[0], "sku":"TEST-DRESS-001", "category":"女士短连衣裙"}]
+    mismatch = asyncio.run(main.validate_draft(json.dumps(other), "200.00", FakeUpload()))
+    assert any("没有" in e["message"] and "女士短连衣裙" in e["message"] for e in mismatch["errors"])
+
+def test_validate_csv_upload_still_works():
+    class FakeUpload:
+        filename = "products.csv"
+        async def read(self): return b"category,title,description_en,sku,price\n" + "女士两件套,Set,Set,TEST-SET-001,200.00\n".encode()
+    result = asyncio.run(main.validate_products(FakeUpload(), "200.00", None))
+    assert result["count"] == 1 and result["preview"][0]["sku"] == "TEST-SET-001"
 
