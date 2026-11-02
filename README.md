@@ -1,29 +1,27 @@
-# SHEIN 电商批量上品助手
+# SHEIN 半托管女装 Excel 批量上品系统
 
-面向 SHEIN 女装运营的批量商品预检项目。第一版支持 **CSV 批量导入、必填字段校验、SKU 去重、价格和库存校验、违禁词检查，以及 JSON 报告输出**。
+第一版提供中文 FastAPI Web 后台：上传官方 XLSX 模板、识别三个女装类目工作表、导入 CSV/JSON 商品资料、检查必填项/重复 SKU/敏感词并导出 XLSX。导出时保留模板工作表及前六行内容；不会连接 SHEIN API，也不会自动发布商品。
 
-**当前不具备真实上品功能**：尚未对接 SHEIN 授权 API。不要把本地数据验证当成平台核价或审核通过保证。
-
-## 运行
-
-要求 Python 3.10+，无第三方依赖。
+## 本地启动（Mac / Linux）
 
 ```bash
-python -m bulk_listing validate examples/products.csv --output report.json
-python -m unittest discover -s tests -v
+cd codex1
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-CSV 必填列：`sku,title,description,price,stock,image_urls`；可选列：`category,color,size`。多图 URL 用竖线 `|` 分隔。字段只是项目内部格式，不等于平台官方模板。
+浏览器打开 <http://127.0.0.1:8000>。云端 Web preview 使用 `0.0.0.0` 监听，并可通过 `PORT` 环境变量指定端口。商品 CSV 需要包含：`category,title,description_en,sku,color,size,price,stock,image_url`；也支持同结构 JSON 数组。类目值使用 `女士两件套`、`女士短连衣裙` 或 `女士连体裤`。
 
-## 后续开发
+## 测试
 
-- Excel (.xlsx) 导入、SHEIN 模板映射和变体 SKU
-- 图像素材上传与图片尺寸检查
-- Web 管理后台、批次进度、审核和失败重试
-- 经店铺授权后对接平台官方 API，实现提交和状态回查
+```bash
+pytest -q
+```
 
-查看 [AGENTS.md](AGENTS.md) 获取 Codex 任务指引。
+## 一键启动
 
-## 安全
-
-项目默认仅做 dry-run，不自动提交商品。不要提交账号密码、Cookie、API Token、真实客户资料。正式上架应提供预览、明确确认和可追溯日志。
+```bash
+./start.sh
+```
