@@ -389,10 +389,34 @@ async def inspect_template(template: UploadFile = File(...)):
     wb = load_workbook(io.BytesIO(await template.read()), read_only=False)
     return {"sheets": detect_sheets(wb), "categories": CATEGORIES, "metadata": template_metadata(wb)}
 
+def validation_result(rows: list[dict[str, Any]], template_bytes: bytes | None = None) -> dict[str, Any]:
+    errors = validate(rows, ["category", "title", "description_en", "sku", "price"])
+    if template_bytes:
+        try:
+            wb = load_workbook(io.BytesIO(template_bytes), read_only=False)
+            available = {category_for_sheet(ws.title) for ws in wb.worksheets}
+            for i, row in enumerate(rows, 1):
+                if row.get("category") not in available:
+                    errors.append({"row": i, "sku": row.get("sku", ""), "field": "category", "message": f"上传的官方模板没有“{row.get('category', '')}”工作表；请换用对应类目模板"})
+        except Exception as exc:
+            errors.append({"row": 0, "field": "template", "message": f"无法读取官方 XLSX 模板：{exc}"})
+    return {"count": len(rows), "errors": errors, "preview": rows, "pricing_statuses": PRICE_STATUSES}
+
 @app.post("/api/validate")
-async def validate_products(products: UploadFile = File(...), default_price: str = Form("200.00")):
+async def validate_products(products: UploadFile = File(...), default_price: str = Form("200.00"), template: UploadFile | None = File(None)):
     rows = prepare_products(parse_products(await products.read(), products.filename or "products.csv"), default_price)
-    return {"count": len(rows), "errors": validate(rows), "preview": rows[:20], "pricing_statuses": PRICE_STATUSES}
+    return validation_result(rows, await template.read() if template else None)
+
+@app.post("/api/validate-draft")
+async def validate_draft(products_json: str = Form(...), default_price: str = Form("200.00"), template: UploadFile | None = File(None)):
+    try:
+        rows = json.loads(products_json)
+    except (ValueError, TypeError):
+        rows = None
+    if not isinstance(rows, list) or not rows:
+        return {"count": 0, "errors": [{"row": 0, "field": "products", "message": "请先上传 CSV/JSON 商品资料，或加载已有商品草稿"}], "preview": []}
+    rows = prepare_products(rows, default_price)
+    return validation_result(rows, await template.read() if template else None)
 
 @app.post("/api/export")
 async def export(template: UploadFile = File(...), products: UploadFile = File(...), default_price: str = Form("200.00")):
