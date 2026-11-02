@@ -281,4 +281,26 @@ def test_export_frontend_uses_checked_rows_and_blocks_empty_selection():
     html = index()
     assert "JSON.stringify(selected)" in html
     assert "请先勾选至少一件商品再导出" in html
+    assert "导出草稿 XLSX（无需图片 URL）" in html and "exportFile('draft')" in html
+    assert "exportFile('strict')" in html and "f.append('mode',mode)" in html
+
+def test_draft_export_leaves_all_official_image_columns_empty():
+    row = {"category":"女士短连衣裙", "sku":"TEST-DRESS-001", "title":"Dress", "description_en":"Dress", "price":"200.00",
+           "image_url":"https://example.com/placeholder.jpg", "images":{"display":[{"url":"https://example.com/placeholder.jpg"}, {"url":"https://example.com/placeholder-2.jpg"}]}}
+    result = export_workbook(image_template_with_slots(), [row], image_mode="draft")
+    ws = load_workbook(io.BytesIO(result))["女士短连衣裙 67-1727"]
+    assert ws["I7"].value is None and ws["J7"].value is None and ws["K7"].value is None
+    assert ws["D7"].value == 200
+
+def test_draft_export_allows_blank_price_but_strict_export_keeps_image_checks():
+    row = {"category":"女士两件套", "sku":"TEST-SET-001", "title":"Set", "description_en":"Set", "price":"",
+           "images":{"display":[]}}
+    result = export_workbook(image_template_with_slots(), [row], image_mode="draft")
+    ws = load_workbook(io.BytesIO(result))["女士两件套 95-1780"]
+    assert ws["D7"].value is None
+    try:
+        export_workbook(image_template_with_slots(), [row], image_mode="strict")
+        assert False, "strict export should enforce image count"
+    except TemplateError as exc:
+        assert "少于 2 张" in str(exc)
 
