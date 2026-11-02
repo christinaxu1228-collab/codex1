@@ -256,3 +256,29 @@ def test_validate_csv_upload_still_works():
     result = asyncio.run(main.validate_products(FakeUpload(), "200.00", None))
     assert result["count"] == 1 and result["preview"][0]["sku"] == "TEST-SET-001"
 
+def single_category_template_bytes(category="女士两件套 95-1780"):
+    wb = Workbook(); ws = wb.active; ws.title = category
+    for i, h in enumerate(["supplier_sku", "default_product_name[en]", "default_product_desc[en]", "cost", "color", "size", "warehouse_stock", "main_image"], 1):
+        ws.cell(2, i, h); ws.cell(3, i, h)
+    out = io.BytesIO(); wb.save(out); return out.getvalue()
+
+def test_export_only_selected_category_does_not_require_unselected_sheets():
+    selected = {"category":"女士两件套", "sku":"TEST-SET-001", "title":"Set", "description_en":"Set", "price":"200.00", "color":"黑色", "size":"M", "stock":"1", "image_url":"https://cdn.test/set.jpg"}
+    unselected = {"category":"女士短连衣裙", "sku":"TEST-DRESS-001", "title":"Dress", "description_en":"Dress", "price":"200.00"}
+    result = export_workbook(single_category_template_bytes(), [selected])
+    ws = load_workbook(io.BytesIO(result))["女士两件套 95-1780"]
+    assert ws["A7"].value == "TEST-SET-001" and ws["D7"].value == 200
+    try:
+        export_workbook(single_category_template_bytes(), [unselected])
+        assert False, "category mismatch should be rejected"
+    except TemplateError as exc:
+        assert "缺少工作表" in str(exc)
+
+def test_example_com_placeholder_is_not_formal_image_url():
+    assert any("占位地址" in e for e in main.validate_image_for_field("https://example.com/test.jpg", "main_img"))
+
+def test_export_frontend_uses_checked_rows_and_blocks_empty_selection():
+    html = index()
+    assert "JSON.stringify(selected)" in html
+    assert "请先勾选至少一件商品再导出" in html
+
