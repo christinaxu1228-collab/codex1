@@ -91,13 +91,13 @@ def money(value: Any, default: Decimal = DEFAULT_DECLARED_PRICE) -> str:
         return str(value)
     return f"{amount:.2f}"
 
-def prepare_products(products: list[dict[str, Any]], default_price: Any = DEFAULT_DECLARED_PRICE) -> list[dict[str, Any]]:
+def prepare_products(products: list[dict[str, Any]], default_price: Any = DEFAULT_DECLARED_PRICE, use_default_price: bool = True) -> list[dict[str, Any]]:
     try: fallback = Decimal(str(default_price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     except (InvalidOperation, ValueError): fallback = DEFAULT_DECLARED_PRICE
     prepared = []
     for source in products:
         row = normalize(source)
-        row["price"] = money(row.get("price"), fallback)
+        row["price"] = money(row.get("price"), fallback) if use_default_price else ("" if not str(row.get("price", "")).strip() else money(row.get("price"), fallback))
         # Keep legacy drafts usable while preserving any explicitly edited value.
         row.setdefault("main_attribute", "颜色")
         row.setdefault("main_attribute_value", row.get("color", ""))
@@ -301,7 +301,8 @@ def template_required_fields(ws) -> list[str]:
         if field not in required: required.append(field)
     return required
 
-def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
+def export_workbook(template: bytes, products: list[dict[str, Any]], image_mode: str = "strict") -> bytes:
+    draft_mode = image_mode == "draft"
     wb = load_workbook(io.BytesIO(template))
     found = {category_for_sheet(ws.title) for ws in wb.worksheets}
     selected_categories = {str(p.get("category", "")).strip() for p in products}
@@ -324,13 +325,14 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
             target = 7 + offset
             for required in template_required_fields(ws):
                 if required in {"supplier_sku", "sku"}: required = "sku"
+                if draft_mode and required == "price": continue
                 if not str(product.get(required, "")).strip():
                     raise TemplateError(f"工作表“{ws.title}”第 {target} 行缺少必填字段：{required}（请按第2-6行填写要求补充）")
             if product.get("attr_160") and valid_materials and product["attr_160"] not in valid_materials:
                 raise TemplateError(f"工作表“{ws.title}”第 {target} 行材质不在官方有效属性值中：{product['attr_160']}；请以模板“有效属性值”表为准")
             image_values = product_images_in_order(product)
             image_fields = template_display_fields(ws)
-            if image_fields:
+            if image_fields and not draft_mode:
                 if len(image_fields) > 1 and len(image_values) < 2:
                     raise TemplateError(f"工作表“{ws.title}”第 {target} 行商品展示图片少于 2 张；无需提供固定的正面、侧面、背面或材质图")
                 if len(image_values) > len(image_fields):
@@ -343,18 +345,23 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
             for field, value in product.items():
                 if field == "declared_price":
                     continue  # 旧 CSV/草稿快照不能覆盖网页最终确认的 price
+                if draft_mode and (field == "image_url" or field in template_image_fields(ws) or field.startswith("detail_img_")):
+                    continue
                 if field in {"shein_feedback_price", "pricing_status", "pricing_note"}:
                     continue  # 核价管理字段属于本系统记录，不写入官方商品模板
                 col = columns.get(field)
                 if col is None:
                     continue  # 未在官方第2-6行声明的输入不写入模板，也不制造第7行表头
-                if field == "price": value = money(value)
+                if field == "price": value = "" if draft_mode and not str(value).strip() else money(value)
                 ws.cell(target, col, float(value) if field == "price" and str(value).replace('.', '', 1).isdigit() else value)
                 if field == "price": ws.cell(target, col).number_format = "0.00"
             # 图片必须使用模板声明的字段，并且只能写公开 URL；本地上传文件仅作为草稿资产保存。
-            if template_display_fields(ws):
+            if template_display_fields(ws) and not draft_mode:
                 for index, image in enumerate(product_images_in_order(product)):
                     ws.cell(target, columns[template_display_fields(ws)[index]], image_url(image))
+            if draft_mode:
+                for field in template_image_fields(ws):
+                    if field in columns: ws.cell(target, columns[field], None)
             # Fill a template currency column only when the official sheet exposes one.
             for col in range(1, ws.max_column + 1):
                 label = str(ws.cell(2, col).value or ws.cell(3, col).value or "").lower()
@@ -362,10 +369,10 @@ def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
                     if not ws.cell(target, col).value: ws.cell(target, col, "USD")
     output = io.BytesIO(); wb.save(output); output.seek(0); return output.getvalue()
 
-def verify_export(template: bytes, result: bytes, products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def verify_export(template: bytes, result: bytes, products: list[dict[str, Any]], image_mode: str = "strict") -> list[dict[str, Any]]:
     """Read the generated workbook and compare every exported SKU and cost."""
     wb = load_workbook(io.BytesIO(result), data_only=False)
-    expected = {(str(p.get("category")), str(p.get("sku"))): money(p.get("price")) for p in products}
+    expected = {(str(p.get("category")), str(p.get("sku"))): ("" if image_mode == "draft" and not str(p.get("price", "")).strip() else money(p.get("price"))) for p in products}
     actual = set()
     errors = []
     for ws in wb.worksheets:
@@ -379,7 +386,7 @@ def verify_export(template: bytes, result: bytes, products: list[dict[str, Any]]
             key = (category, str(sku))
             actual.add(key)
             if key not in expected: errors.append({"sku": str(sku), "message": "导出文件出现未确认的 SKU"})
-            elif cost is None or money(cost) != expected[key]: errors.append({"sku": str(sku), "message": f"cost 为 {cost}，预期 {expected[key]}"})
+            elif ("" if cost is None else money(cost)) != expected[key]: errors.append({"sku": str(sku), "message": f"cost 为 {cost}，预期 {expected[key]}"})
     for key in expected:
         if key not in actual: errors.append({"sku": key[1], "message": "导出文件缺少该 SKU"})
     return errors
@@ -428,15 +435,15 @@ async def validate_draft(products_json: str = Form(...), default_price: str = Fo
     return validation_result(rows, await template.read() if template else None)
 
 @app.post("/api/export")
-async def export(template: UploadFile = File(...), products: UploadFile = File(...), default_price: str = Form("200.00")):
-    template_bytes = await template.read(); rows = prepare_products(parse_products(await products.read(), products.filename or "products.csv"), default_price)
+async def export(template: UploadFile = File(...), products: UploadFile = File(...), default_price: str = Form("200.00"), mode: str = Form("strict")):
+    template_bytes = await template.read(); rows = prepare_products(parse_products(await products.read(), products.filename or "products.csv"), default_price, use_default_price=mode != "draft")
     if not rows:
         return {"ok": False, "errors": [{"row": 0, "field": "products", "message": "请先勾选至少一件商品再导出"}], "preview": []}
-    errors = validate(rows, ["category", "title", "description_en", "price"])
+    errors = validate(rows, ["category", "title", "description_en", "sku"] + ([] if mode == "draft" else ["price"]))
     if errors: return {"ok": False, "errors": errors, "preview": rows[:20]}
-    try: result = export_workbook(template_bytes, rows)
+    try: result = export_workbook(template_bytes, rows, image_mode="draft" if mode == "draft" else "strict")
     except TemplateError as exc: return {"ok": False, "errors": [{"row": 0, "field": "template", "message": str(exc)}], "preview": rows[:20]}
-    verification_errors = verify_export(template_bytes, result, rows)
+    verification_errors = verify_export(template_bytes, result, rows, image_mode="draft" if mode == "draft" else "strict")
     if verification_errors:
         return {"ok": False, "errors": [{"row": 0, "field": "export", **error} for error in verification_errors], "preview": rows[:20]}
     return StreamingResponse(io.BytesIO(result), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=shein_products.xlsx"})
