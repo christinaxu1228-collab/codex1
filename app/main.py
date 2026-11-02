@@ -173,6 +173,13 @@ def image_url(value: Any) -> str:
     if isinstance(value, dict): return str(value.get("url", "")).strip()
     return str(value or "").strip()
 
+def is_placeholder_image_url(value: str) -> bool:
+    try:
+        from urllib.parse import urlparse
+        return urlparse(value).hostname in {"example.com", "www.example.com"}
+    except Exception:
+        return False
+
 def product_image_values(product: dict[str, Any], field: str) -> list[Any]:
     images = product.get("images") or {}
     value = images.get(field) if isinstance(images, dict) else None
@@ -230,6 +237,7 @@ def image_dimensions(raw: bytes, suffix: str) -> tuple[int, int, str]:
 def validate_image_for_field(asset: Any, field: str) -> list[str]:
     if isinstance(asset, str):
         if not re.match(r"^https?://\S+$", asset): return ["必须是可访问的 http/https 图片链接；本地文件不能直接导出"]
+        if is_placeholder_image_url(asset): return ["example.com 是占位地址，不能用于正式导出"]
         return []
     errors = validate_image_asset(asset if isinstance(asset, dict) else {})
     if isinstance(asset, dict) and asset.get("official_url_status") not in (None, "通过"):
@@ -296,7 +304,8 @@ def template_required_fields(ws) -> list[str]:
 def export_workbook(template: bytes, products: list[dict[str, Any]]) -> bytes:
     wb = load_workbook(io.BytesIO(template))
     found = {category_for_sheet(ws.title) for ws in wb.worksheets}
-    missing = [name for name in CATEGORIES if name not in found]
+    selected_categories = {str(p.get("category", "")).strip() for p in products}
+    missing = [name for name in selected_categories if name in CATEGORIES and name not in found]
     if missing:
         raise TemplateError("官方模板缺少工作表：" + "、".join(missing))
     by_category = {c: [] for c in CATEGORIES}
@@ -421,6 +430,8 @@ async def validate_draft(products_json: str = Form(...), default_price: str = Fo
 @app.post("/api/export")
 async def export(template: UploadFile = File(...), products: UploadFile = File(...), default_price: str = Form("200.00")):
     template_bytes = await template.read(); rows = prepare_products(parse_products(await products.read(), products.filename or "products.csv"), default_price)
+    if not rows:
+        return {"ok": False, "errors": [{"row": 0, "field": "products", "message": "请先勾选至少一件商品再导出"}], "preview": []}
     errors = validate(rows, ["category", "title", "description_en", "price"])
     if errors: return {"ok": False, "errors": errors, "preview": rows[:20]}
     try: result = export_workbook(template_bytes, rows)
